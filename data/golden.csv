@@ -1,0 +1,10 @@
+question,reference_answer,source,evidence
+How soon must a data breach be reported under GDPR?,Within 72 hours of becoming aware of it.,gdpr.txt,within 72 hours
+Since when does the GDPR apply?,Since 25 May 2018.,gdpr.txt,25 May 2018
+When must a company appoint a Data Protection Officer?,When core activities involve large-scale monitoring of individuals.,gdpr.txt,Data Protection Officer
+What is the maximum GDPR fine?,"Up to 20 million euros or 4 percent of worldwide annual turnover, whichever is higher.",gdpr.txt,4 percent
+What are the four risk tiers of the EU AI Act?,"Unacceptable, high, limited and minimal risk.",ai_act.txt,four tiers
+Which AI practices are banned under the AI Act?,Unacceptable-risk practices such as social scoring by public authorities.,ai_act.txt,social scoring
+What must chatbots disclose under the AI Act?,That users are interacting with an AI.,ai_act.txt,interacting with an AI
+Where is the ECB based and what is its main goal?,Frankfurt; price stability.,euro.txt,price stability
+When did euro banknotes enter circulation?,1 January 2002.,euro.txt,1 January 2002
