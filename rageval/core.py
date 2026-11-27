@@ -68,15 +68,40 @@ def chunk(txt, size, overlap=0):
     ]
 
 
-# ---------- vector search (Qdrant) ----------
+# ---------- vector search (Qdrant + FastEmbed) ----------
 
 def get_model(name):
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer(name)
+    """Load an ONNX embedding model using FastEmbed."""
+    from fastembed import TextEmbedding
+
+    return TextEmbedding(
+        model_name=name,
+        threads=1
+    )
 
 
 def _encode(model, texts, batch_size=None):
-    """Encode with small batches, while supporting simple test doubles."""
+    """Encode text using FastEmbed or compatible test doubles."""
+
+    if hasattr(model, "embed"):
+        import numpy as np
+
+        single = isinstance(texts, str)
+        items = [texts] if single else texts
+
+        vectors = np.asarray(
+            list(
+                model.embed(
+                    items,
+                    batch_size=batch_size or ENCODE_BATCH_SIZE
+                )
+            ),
+            dtype="float32"
+        )
+
+        return vectors[0] if single else vectors
+
+    # Compatibility with the existing unit tests.
     kwargs = {"normalize_embeddings": True}
 
     if batch_size is not None:
@@ -87,8 +112,10 @@ def _encode(model, texts, batch_size=None):
     try:
         return model.encode(texts, **kwargs)
     except TypeError:
-        # Compatibility with lightweight mocked models in tests.
-        return model.encode(texts, normalize_embeddings=True)
+        return model.encode(
+            texts,
+            normalize_embeddings=True
+        )
 
 
 def build_index(chunks, model_name):
@@ -103,14 +130,16 @@ def build_index(chunks, model_name):
 
     try:
         url = os.getenv("QDRANT_URL")
+
         client = (
             QdrantClient(url=url)
             if url
             else QdrantClient(":memory:")
         )
 
-        # Encode the first batch to discover vector dimensions.
+        # Encode only the first small batch to discover vector dimensions.
         first_batch = chunks[:ENCODE_BATCH_SIZE]
+
         first_vectors = _encode(
             model,
             [item["text"] for item in first_batch],
@@ -145,11 +174,18 @@ def build_index(chunks, model_name):
             del points
 
         upload_batch(0, first_batch, first_vectors)
+
         del first_vectors, first_batch
         gc.collect()
 
-        for start in range(ENCODE_BATCH_SIZE, len(chunks), ENCODE_BATCH_SIZE):
-            batch = chunks[start:start + ENCODE_BATCH_SIZE]
+        for start in range(
+            ENCODE_BATCH_SIZE,
+            len(chunks),
+            ENCODE_BATCH_SIZE
+        ):
+            batch = chunks[
+                start:start + ENCODE_BATCH_SIZE
+            ]
 
             vectors = _encode(
                 model,
@@ -229,6 +265,7 @@ def is_rel(chunk_, row):
 
 def retrieval_metrics(rel, total_rel, k):
     got = sum(rel)
+
     first = next(
         (i for i, x in enumerate(rel, 1) if x),
         None
@@ -270,10 +307,12 @@ def llm(prompt, as_json=False):
             response = Groq().chat.completions.create(
                 model=os.getenv(
                     "GROQ_MODEL",
-                    "llama-3.3-70b-versatile"
+                    "openai/gpt-oss-120b"
                 ),
                 temperature=0,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
                 **kw
             )
 
@@ -282,6 +321,7 @@ def llm(prompt, as_json=False):
         except Exception:
             if attempt == 4:
                 raise
+
             time.sleep(4 * 2 ** attempt)
 
 
@@ -374,7 +414,11 @@ def run_benchmark(
                 for qi, (_, g) in enumerate(golden.iterrows()):
                     t0 = time.perf_counter()
 
-                    hits = retrieve(index, g["question"], k)
+                    hits = retrieve(
+                        index,
+                        g["question"],
+                        k
+                    )
 
                     relevant = [
                         is_rel(hit.payload, g)
@@ -417,6 +461,7 @@ def run_benchmark(
                             answer,
                             g["reference_answer"]
                         )
+
                         metrics.update(scores)
 
                     per_q.append(metrics)
