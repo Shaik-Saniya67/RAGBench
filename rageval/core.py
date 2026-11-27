@@ -75,6 +75,22 @@ def get_model(name):
     return SentenceTransformer(name)
 
 
+def _encode(model, texts, batch_size=None):
+    """Encode with small batches, while supporting simple test doubles."""
+    kwargs = {"normalize_embeddings": True}
+
+    if batch_size is not None:
+        kwargs["batch_size"] = batch_size
+        kwargs["show_progress_bar"] = False
+        kwargs["convert_to_numpy"] = True
+
+    try:
+        return model.encode(texts, **kwargs)
+    except TypeError:
+        # Compatibility with lightweight mocked models in tests.
+        return model.encode(texts, normalize_embeddings=True)
+
+
 def build_index(chunks, model_name):
     if not chunks:
         raise ValueError("No text could be extracted from the documents.")
@@ -83,6 +99,7 @@ def build_index(chunks, model_name):
 
     model = get_model(model_name)
     client = None
+    collection_name = "bench_" + uuid.uuid4().hex[:8]
 
     try:
         url = os.getenv("QDRANT_URL")
@@ -92,9 +109,15 @@ def build_index(chunks, model_name):
             else QdrantClient(":memory:")
         )
 
-        collection_name = "bench_" + uuid.uuid4().hex[:8]
+        # Encode the first batch to discover vector dimensions.
+        first_batch = chunks[:ENCODE_BATCH_SIZE]
+        first_vectors = _encode(
+            model,
+            [item["text"] for item in first_batch],
+            ENCODE_BATCH_SIZE
+        )
 
-        dimension = model.get_sentence_embedding_dimension()
+        dimension = first_vectors.shape[1]
 
         client.create_collection(
             collection_name,
@@ -104,19 +127,7 @@ def build_index(chunks, model_name):
             )
         )
 
-        # Encode and upload small batches to reduce peak memory.
-        for start in range(0, len(chunks), ENCODE_BATCH_SIZE):
-            batch = chunks[start:start + ENCODE_BATCH_SIZE]
-            texts = [item["text"] for item in batch]
-
-            vectors = model.encode(
-                texts,
-                batch_size=ENCODE_BATCH_SIZE,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-                convert_to_numpy=True
-            )
-
+        def upload_batch(start, batch, vectors):
             points = [
                 models.PointStruct(
                     id=start + i,
@@ -131,14 +142,35 @@ def build_index(chunks, model_name):
                 points=points
             )
 
-            del vectors, points, texts, batch
+            del points
+
+        upload_batch(0, first_batch, first_vectors)
+        del first_vectors, first_batch
+        gc.collect()
+
+        for start in range(ENCODE_BATCH_SIZE, len(chunks), ENCODE_BATCH_SIZE):
+            batch = chunks[start:start + ENCODE_BATCH_SIZE]
+
+            vectors = _encode(
+                model,
+                [item["text"] for item in batch],
+                ENCODE_BATCH_SIZE
+            )
+
+            upload_batch(start, batch, vectors)
+
+            del vectors, batch
             gc.collect()
 
         return client, collection_name, model
 
     except Exception:
         if client is not None:
-            client.close()
+            try:
+                client.close()
+            except Exception:
+                pass
+
         del model
         gc.collect()
         raise
@@ -147,11 +179,9 @@ def build_index(chunks, model_name):
 def retrieve(index, question, k):
     client, name, model = index
 
-    query_vector = model.encode(
-        question,
-        normalize_embeddings=True,
-        show_progress_bar=False,
-        convert_to_numpy=True
+    query_vector = _encode(
+        model,
+        question
     ).tolist()
 
     return client.query_points(
@@ -162,21 +192,24 @@ def retrieve(index, question, k):
 
 
 def close_index(index):
-    if index is not None:
-        client, name, model = index
+    # Offline tests replace build_index with a list of chunks.
+    if not isinstance(index, tuple) or len(index) != 3:
+        return
 
-        try:
-            client.delete_collection(name)
-        except Exception:
-            pass
+    client, name, model = index
 
-        try:
-            client.close()
-        except Exception:
-            pass
+    try:
+        client.delete_collection(name)
+    except Exception:
+        pass
 
-        del client, model
-        gc.collect()
+    try:
+        client.close()
+    except Exception:
+        pass
+
+    del client, model
+    gc.collect()
 
 
 # ---------- metrics ----------
@@ -187,6 +220,7 @@ def is_rel(chunk_, row):
         if pd.isna(row["evidence"])
         else str(row["evidence"]).lower()
     )
+
     return (
         chunk_["source"] == row["source"]
         and (not ev or ev in chunk_["text"].lower())
@@ -242,6 +276,7 @@ def llm(prompt, as_json=False):
                 messages=[{"role": "user", "content": prompt}],
                 **kw
             )
+
             return response.choices[0].message.content
 
         except Exception:
@@ -303,8 +338,7 @@ def run_benchmark(
     rows = []
     details = []
 
-    # One index per model/chunk-size pair.
-    # All Top-K values reuse that index.
+    # Only one model/chunk-size index is kept at a time.
     configurations = list(
         itertools.product(models, sizes)
     )
@@ -314,14 +348,9 @@ def run_benchmark(
 
     for mod, size in configurations:
         label_base = mod.split("/")[-1]
-
         label = f"{label_base} ({size}w)"
 
-        progress(
-            completed,
-            total_runs,
-            label
-        )
+        progress(completed, total_runs, label)
 
         chunks = [
             {"source": source, "text": text_chunk}
@@ -335,7 +364,9 @@ def run_benchmark(
             index = build_index(chunks, mod)
 
             for k in ks:
-                config_label = f"{label_base} ({size}w, k={k})"
+                config_label = (
+                    f"{label_base} ({size}w, k={k})"
+                )
 
                 per_q = []
                 det = []
@@ -433,11 +464,7 @@ def run_benchmark(
             del chunks
             gc.collect()
 
-    progress(
-        total_runs,
-        total_runs,
-        "Done"
-    )
+    progress(total_runs, total_runs, "Done")
 
     return (
         pd.DataFrame(rows),
