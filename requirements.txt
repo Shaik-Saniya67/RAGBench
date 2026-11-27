@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 python-multipart
 pandas
-sentence-transformers
+fastembed
 qdrant-client>=1.10
 groq
 pypdf
